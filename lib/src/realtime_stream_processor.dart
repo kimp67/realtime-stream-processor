@@ -261,13 +261,17 @@ class RealtimeStreamProcessor {
         // 프레임 처리
         final result = await _processFrame(frameData);
         
-        // 결과 스트림에 전송
-        _outputStreamController.add(result);
+        // 결과가 유효한 경우만 스트림에 전송
+        if (!_outputStreamController.isClosed) {
+          _outputStreamController.add(result);
+        }
         
         _processedFrameCount++;
         
       } catch (e) {
         _handleError(Exception('Frame processing error: $e'));
+        // 에러가 발생해도 처리를 계속 진행
+        continue;
       }
     }
   }
@@ -328,14 +332,8 @@ class RealtimeStreamProcessor {
       
       if (format == null) return null;
       
-      // 평면 데이터 생성
-      final planes = cameraImage.planes.map((plane) {
-        return InputImageMetadata(
-          bytesPerRow: plane.bytesPerRow,
-          height: plane.height,
-          width: plane.width,
-        );
-      }).toList();
+      // 평면 데이터 생성 - 각 평면의 크기를 올바르게 계산
+      final planes = _buildPlaneMetadata(cameraImage);
       
       // InputImageData 생성
       final inputImageData = InputImageData(
@@ -362,13 +360,69 @@ class RealtimeStreamProcessor {
     }
   }
   
-  /// 평면 데이터 결합
-  Uint8List _concatenatePlanes(List<Plane> planes) {
-    final allBytes = <int>[];
-    for (final plane in planes) {
-      allBytes.addAll(plane.bytes);
+  /// 평면 메타데이터 생성 (YUV420 및 기타 포맷 지원)
+  List<InputImagePlaneMetadata> _buildPlaneMetadata(CameraImage cameraImage) {
+    final planes = <InputImagePlaneMetadata>[];
+    
+    for (int i = 0; i < cameraImage.planes.length; i++) {
+      final plane = cameraImage.planes[i];
+      int planeHeight;
+      int planeWidth;
+      
+      // YUV420 포맷의 경우 평면별 크기가 다름
+      if (cameraImage.format.group == ImageFormatGroup.yuv420) {
+        if (i == 0) {
+          // Y 평면: 원본 크기
+          planeHeight = cameraImage.height;
+          planeWidth = cameraImage.width;
+        } else {
+          // U, V 평면: 절반 크기
+          planeHeight = cameraImage.height ~/ 2;
+          planeWidth = cameraImage.width ~/ 2;
+        }
+      } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
+        // BGRA8888 포맷: 단일 평면, 원본 크기
+        planeHeight = cameraImage.height;
+        planeWidth = cameraImage.width;
+      } else {
+        // 기타 포맷: 기본값 사용
+        planeHeight = cameraImage.height;
+        planeWidth = cameraImage.width;
+      }
+      
+      planes.add(InputImagePlaneMetadata(
+        bytesPerRow: plane.bytesPerRow,
+        height: planeHeight,
+        width: planeWidth,
+      ));
     }
-    return Uint8List.fromList(allBytes);
+    
+    return planes;
+  }
+  
+  /// 평면 데이터 결합 (성능 최적화)
+  Uint8List _concatenatePlanes(List<Plane> planes) {
+    // 전체 크기 계산
+    final totalSize = planes.fold<int>(
+      0,
+      (sum, plane) => sum + plane.bytes.length,
+    );
+    
+    // 한 번에 메모리 할당
+    final allBytes = Uint8List(totalSize);
+    var offset = 0;
+    
+    // 각 평면 데이터를 복사
+    for (final plane in planes) {
+      allBytes.setRange(
+        offset,
+        offset + plane.bytes.length,
+        plane.bytes,
+      );
+      offset += plane.bytes.length;
+    }
+    
+    return allBytes;
   }
   
   /// CameraImage를 이미지 바이트로 변환
@@ -379,9 +433,9 @@ class RealtimeStreamProcessor {
         return _convertYUV420ToRGB(cameraImage);
       }
       
-      // BGRA8888 포맷 (iOS)
+      // BGRA8888 포맷 (iOS) - 복사본 생성
       if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
-        return cameraImage.planes[0].bytes;
+        return Uint8List.fromList(cameraImage.planes[0].bytes);
       }
       
       return null;
@@ -431,6 +485,9 @@ class RealtimeStreamProcessor {
   
   /// 에러 처리
   void _handleError(Exception error) {
-    _errorStreamController.add(error);
+    // 스트림이 닫혀있지 않은 경우만 에러 전송
+    if (!_errorStreamController.isClosed) {
+      _errorStreamController.add(error);
+    }
   }
 }
