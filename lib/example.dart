@@ -57,6 +57,8 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
 
   Future<void> _initializeProcessor() async {
     try {
+      print('🎬 Starting initialization...');
+      
       // 프로세서 생성 - 기본 처리 사용 (이미지 변환 포함)
       _processor = RealtimeStreamProcessor(
         maxQueueSize: 10,
@@ -98,12 +100,21 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
         }
       });
 
+      print('📷 Getting available cameras...');
+      
       // 카메라 초기화
       final cameras = await availableCameras();
+      print('📷 Found ${cameras.length} cameras');
+      
       if (cameras.isEmpty) {
         throw Exception('No cameras available');
       }
 
+      print('📷 Initializing camera controller...');
+      print('   - Camera: ${cameras.first.name}');
+      print('   - Lens: ${cameras.first.lensDirection}');
+      print('   - Sensor orientation: ${cameras.first.sensorOrientation}');
+      
       _cameraController = CameraController(
         cameras.first,
         ResolutionPreset.medium,
@@ -113,21 +124,30 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
             : ImageFormatGroup.bgra8888,
       );
 
+      print('📷 Waiting for camera initialization...');
       await _cameraController!.initialize();
+      print('✅ Camera controller initialized successfully');
+      print('   - Resolution: ${_cameraController!.value.previewSize}');
+      print('   - Aspect ratio: ${_cameraController!.value.aspectRatio}');
 
       // 프로세서에 카메라 초기화
+      print('🔧 Initializing processor with camera...');
       await _processor.initializeCamera(
         cameraDescription: cameras.first,
         resolutionPreset: ResolutionPreset.medium,
       );
+      print('✅ Processor initialized successfully');
 
       if (mounted) {
         setState(() {
           _isInitialized = true;
-          _statusMessage = 'Ready to start';
+          _statusMessage = 'Ready to start - Camera preview should be visible';
         });
+        print('✅ UI updated - initialization complete');
       }
-    } catch (e) {
+    } catch (e, stackTrace) {
+      print('❌ Initialization failed: $e');
+      print('Stack trace: $stackTrace');
       if (mounted) {
         setState(() {
           _statusMessage = 'Initialization failed: $e';
@@ -233,6 +253,19 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
       appBar: AppBar(
         title: const Text('Realtime Stream Processor'),
         elevation: 2,
+        actions: [
+          // 디버그 정보 표시
+          if (_cameraController != null)
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Center(
+                child: Text(
+                  _cameraController!.value.isInitialized ? '📹' : '⏳',
+                  style: const TextStyle(fontSize: 20),
+                ),
+              ),
+            ),
+        ],
       ),
       body: _isInitialized
           ? Column(
@@ -261,11 +294,65 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const CircularProgressIndicator(),
+                  const SizedBox(height: 24),
+                  Text(
+                    _statusMessage,
+                    style: const TextStyle(fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
                   const SizedBox(height: 16),
-                  Text(_statusMessage),
+                  // 초기화 단계 표시
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    margin: const EdgeInsets.symmetric(horizontal: 32),
+                    decoration: BoxDecoration(
+                      color: Colors.blue[50],
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Initialization Steps:',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            color: Colors.blue[900],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        _buildInitStep('Creating processor', true),
+                        _buildInitStep('Finding cameras', _cameraController != null),
+                        _buildInitStep('Initializing camera', 
+                          _cameraController?.value.isInitialized ?? false),
+                        _buildInitStep('Ready', _isInitialized),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
+    );
+  }
+  
+  Widget _buildInitStep(String label, bool completed) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Icon(
+            completed ? Icons.check_circle : Icons.radio_button_unchecked,
+            size: 16,
+            color: completed ? Colors.green : Colors.grey,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              color: completed ? Colors.green[700] : Colors.grey[600],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -367,15 +454,55 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
 
   /// 카메라 프리뷰 위젯
   Widget _buildCameraPreview() {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
-      return const Center(
-        child: Text(
-          'Camera not ready',
-          style: TextStyle(color: Colors.white),
+    print('🖼️ Building camera preview widget...');
+    print('   - Controller null? ${_cameraController == null}');
+    print('   - Initialized? ${_cameraController?.value.isInitialized}');
+    
+    if (_cameraController == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(
+              Icons.camera_alt,
+              size: 64,
+              color: Colors.white54,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Camera controller not created',
+              style: TextStyle(color: Colors.white),
+            ),
+          ],
+        ),
+      );
+    }
+    
+    if (!_cameraController!.value.isInitialized) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const CircularProgressIndicator(color: Colors.white),
+            const SizedBox(height: 16),
+            const Text(
+              'Initializing camera...',
+              style: TextStyle(color: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Please wait',
+              style: TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ],
         ),
       );
     }
 
+    print('✅ Camera preview ready - displaying');
+    print('   - Preview size: ${_cameraController!.value.previewSize}');
+    print('   - Aspect ratio: ${_cameraController!.value.aspectRatio}');
+    
     return Center(
       child: AspectRatio(
         aspectRatio: _cameraController!.value.aspectRatio,
