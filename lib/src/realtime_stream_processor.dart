@@ -330,7 +330,7 @@ class RealtimeStreamProcessor {
       
       // 평면 데이터 생성
       final planes = cameraImage.planes.map((plane) {
-        return InputImagePlaneMetadata(
+        return InputImageMetadata(
           bytesPerRow: plane.bytesPerRow,
           height: plane.height,
           width: plane.width,
