@@ -57,10 +57,11 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
 
   Future<void> _initializeProcessor() async {
     try {
-      // 프로세서 생성
+      // 프로세서 생성 - 기본 처리 사용 (이미지 변환 포함)
       _processor = RealtimeStreamProcessor(
         maxQueueSize: 10,
-        onProcessFrame: _customFrameProcessor,
+        // onProcessFrame을 제거하여 기본 처리 사용
+        // 기본 처리는 자동으로 processedImageBytes를 생성함
       );
 
       // 에러 리스너
@@ -69,6 +70,8 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
           setState(() {
             _statusMessage = 'Error: ${error.toString()}';
           });
+          // 콘솔에도 에러 출력
+          print('❌ Processor Error: $error');
         }
       });
 
@@ -82,6 +85,13 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
               _statistics = _processor.statistics;
               _latestResult = result;
               _processedImageBytes = result.processedImageBytes;
+              
+              // 디버깅: 이미지 바이트 상태 확인
+              if (_processedImageBytes != null) {
+                print('✅ Frame #${result.frameId}: Image bytes received (${_processedImageBytes!.length} bytes)');
+              } else {
+                print('⚠️ Frame #${result.frameId}: No image bytes (processedImageBytes is null)');
+              }
             });
             _lastUIUpdate = now;
           }
@@ -126,17 +136,46 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
     }
   }
 
-  /// 커스텀 프레임 처리 함수
+  /// 커스텀 프레임 처리 함수 (참고용 - 현재 사용 안 함)
+  /// 
+  /// 기본 프로세서를 사용하면 자동으로 이미지가 변환됩니다.
+  /// ML Kit 처리가 필요한 경우 이 함수를 활성화하세요.
+  /// 
+  /// 사용 방법:
+  /// RealtimeStreamProcessor(
+  ///   maxQueueSize: 10,
+  ///   onProcessFrame: _customFrameProcessor,  // 이 줄 추가
+  /// )
   Future<ProcessedFrameResult> _customFrameProcessor(FrameData frameData) async {
     // 기본 처리 (이미지 변환)
     final cameraImage = frameData.cameraImage;
     
+    // ✅ 중요: processedImageBytes를 반환해야 UI에 이미지가 표시됨
+    // 방법 1: 프로세서의 내부 메서드 사용 (권장)
+    // 하지만 private 메서드라서 직접 접근 불가
+    
+    // 방법 2: 직접 이미지 변환 (예시)
+    Uint8List? imageBytes;
+    
+    // Android (nv21) 또는 iOS (bgra8888) 처리
+    if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
+      // iOS: 바로 사용 가능
+      imageBytes = Uint8List.fromList(cameraImage.planes[0].bytes);
+    } else if (cameraImage.format.group == ImageFormatGroup.nv21) {
+      // Android: 간단한 그레이스케일 변환
+      // 실제 사용 시에는 더 복잡한 변환 로직 필요
+      imageBytes = cameraImage.planes[0].bytes;
+    }
+    
     // ML Kit InputImage 생성 등의 처리를 수행
     // 여기서 얼굴 인식, 객체 감지 등을 수행할 수 있습니다
+    // final inputImage = InputImage.fromBytes(...);
+    // final faces = await faceDetector.processImage(inputImage);
     
     return ProcessedFrameResult(
       frameId: frameData.frameId,
       processedAt: DateTime.now(),
+      processedImageBytes: imageBytes,  // ✅ 이미지 바이트 포함
       metadata: {
         'width': cameraImage.width,
         'height': cameraImage.height,
@@ -360,21 +399,34 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
             const SizedBox(height: 16),
             Text(
               _processor.isProcessing
-                  ? 'Processing frames...'
+                  ? 'Processing frames...\nWaiting for image data...'
                   : 'Start streaming to see processed images',
               style: TextStyle(color: Colors.grey[400]),
               textAlign: TextAlign.center,
             ),
+            if (_processor.isProcessing) ...[
+              const SizedBox(height: 16),
+              const CircularProgressIndicator(),
+              const SizedBox(height: 8),
+              Text(
+                'Frames processed: ${_statistics['processedFrames'] ?? 0}',
+                style: TextStyle(color: Colors.grey[500], fontSize: 12),
+              ),
+            ],
           ],
         ),
       );
     }
 
+    // 이미지 바이트가 있을 때
+    print('🖼️ Displaying image: ${_processedImageBytes!.length} bytes');
+    
     return Center(
       child: Image.memory(
         _processedImageBytes!,
         fit: BoxFit.contain,
         errorBuilder: (context, error, stackTrace) {
+          print('❌ Image decode error: $error');
           return Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
@@ -383,6 +435,11 @@ class _StreamProcessorDemoState extends State<StreamProcessorDemo> {
               Text(
                 'Image decode error',
                 style: TextStyle(color: Colors.grey[400]),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Size: ${_processedImageBytes!.length} bytes',
+                style: const TextStyle(color: Colors.red, fontSize: 12),
               ),
             ],
           );
