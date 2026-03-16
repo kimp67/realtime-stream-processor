@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:google_mlkit_commons/google_mlkit_commons.dart';
@@ -102,7 +103,9 @@ class RealtimeStreamProcessor {
         camera,
         resolutionPreset,
         enableAudio: enableAudio,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.nv21     // Android: nv21만 지원
+            : ImageFormatGroup.bgra8888, // iOS: bgra8888만 지원
       );
       
       // 카메라 초기화
@@ -303,7 +306,7 @@ class RealtimeStreamProcessor {
     );
   }
   
-  /// CameraImage를 InputImage로 변환 (ML Kit용)
+  /// CameraImage를 InputImage로 변환 (ML Kit용) - 0.11.0 버전
   InputImage? _convertToInputImage(CameraImage cameraImage) {
     try {
       // 플랫폼별 이미지 회전 각도
@@ -313,14 +316,19 @@ class RealtimeStreamProcessor {
       final sensorOrientation = camera.sensorOrientation;
       InputImageRotation? rotation;
       
-      // Android의 경우
-      if (camera.lensDirection == CameraLensDirection.back) {
+      // 플랫폼별 회전 각도 계산
+      if (Platform.isIOS) {
         rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-      } else {
-        // 전면 카메라
-        rotation = InputImageRotationValue.fromRawValue(
-          (sensorOrientation + 180) % 360,
-        );
+      } else if (Platform.isAndroid) {
+        // Android: 디바이스 방향 고려
+        if (camera.lensDirection == CameraLensDirection.back) {
+          rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
+        } else {
+          // 전면 카메라
+          rotation = InputImageRotationValue.fromRawValue(
+            (sensorOrientation + 180) % 360,
+          );
+        }
       }
       
       if (rotation == null) return null;
@@ -330,28 +338,41 @@ class RealtimeStreamProcessor {
         cameraImage.format.raw,
       );
       
-      if (format == null) return null;
+      // 포맷 검증: Android는 nv21만, iOS는 bgra8888만 지원
+      if (format == null ||
+          (Platform.isAndroid && format != InputImageFormat.nv21) ||
+          (Platform.isIOS && format != InputImageFormat.bgra8888)) {
+        _handleError(Exception(
+          'Unsupported format: $format. Android requires nv21, iOS requires bgra8888'
+        ));
+        return null;
+      }
       
-      // 평면 데이터 생성 - 각 평면의 크기를 올바르게 계산
-      final planes = _buildPlaneMetadata(cameraImage);
+      // nv21과 bgra8888은 단일 평면만 사용
+      if (cameraImage.planes.length != 1) {
+        _handleError(Exception(
+          'Expected single plane but got ${cameraImage.planes.length} planes'
+        ));
+        return null;
+      }
       
-      // InputImageData 생성
-      final inputImageData = InputImageData(
+      final plane = cameraImage.planes.first;
+      
+      // InputImageMetadata 생성 (단순화됨 - 평면별 메타데이터 제거)
+      final inputImageMetadata = InputImageMetadata(
         size: Size(
           cameraImage.width.toDouble(),
           cameraImage.height.toDouble(),
         ),
-        imageRotation: rotation,
-        inputImageFormat: format,
-        planeData: planes,
+        rotation: rotation,        // Android에서만 사용
+        format: format,            // iOS에서만 사용
+        bytesPerRow: plane.bytesPerRow, // iOS에서만 사용
       );
       
-      // 바이트 데이터 결합
-      final bytes = _concatenatePlanes(cameraImage.planes);
-      
+      // InputImage 생성
       return InputImage.fromBytes(
-        bytes: bytes,
-        inputImageData: inputImageData,
+        bytes: plane.bytes,
+        metadata: inputImageMetadata,
       );
       
     } catch (e) {
@@ -360,77 +381,12 @@ class RealtimeStreamProcessor {
     }
   }
   
-  /// 평면 메타데이터 생성 (YUV420 및 기타 포맷 지원)
-  List<InputImagePlaneMetadata> _buildPlaneMetadata(CameraImage cameraImage) {
-    final planes = <InputImagePlaneMetadata>[];
-    
-    for (int i = 0; i < cameraImage.planes.length; i++) {
-      final plane = cameraImage.planes[i];
-      int planeHeight;
-      int planeWidth;
-      
-      // YUV420 포맷의 경우 평면별 크기가 다름
-      if (cameraImage.format.group == ImageFormatGroup.yuv420) {
-        if (i == 0) {
-          // Y 평면: 원본 크기
-          planeHeight = cameraImage.height;
-          planeWidth = cameraImage.width;
-        } else {
-          // U, V 평면: 절반 크기
-          planeHeight = cameraImage.height ~/ 2;
-          planeWidth = cameraImage.width ~/ 2;
-        }
-      } else if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
-        // BGRA8888 포맷: 단일 평면, 원본 크기
-        planeHeight = cameraImage.height;
-        planeWidth = cameraImage.width;
-      } else {
-        // 기타 포맷: 기본값 사용
-        planeHeight = cameraImage.height;
-        planeWidth = cameraImage.width;
-      }
-      
-      planes.add(InputImagePlaneMetadata(
-        bytesPerRow: plane.bytesPerRow,
-        height: planeHeight,
-        width: planeWidth,
-      ));
-    }
-    
-    return planes;
-  }
-  
-  /// 평면 데이터 결합 (성능 최적화)
-  Uint8List _concatenatePlanes(List<Plane> planes) {
-    // 전체 크기 계산
-    final totalSize = planes.fold<int>(
-      0,
-      (sum, plane) => sum + plane.bytes.length,
-    );
-    
-    // 한 번에 메모리 할당
-    final allBytes = Uint8List(totalSize);
-    var offset = 0;
-    
-    // 각 평면 데이터를 복사
-    for (final plane in planes) {
-      allBytes.setRange(
-        offset,
-        offset + plane.bytes.length,
-        plane.bytes,
-      );
-      offset += plane.bytes.length;
-    }
-    
-    return allBytes;
-  }
-  
-  /// CameraImage를 이미지 바이트로 변환
+  /// 이미지 바이트로 변환 (선택적 - 시각화용)
   Future<Uint8List?> _convertToImageBytes(CameraImage cameraImage) async {
     try {
-      // YUV420 포맷을 RGB로 변환
-      if (cameraImage.format.group == ImageFormatGroup.yuv420) {
-        return _convertYUV420ToRGB(cameraImage);
+      // NV21 포맷 (Android) - RGB로 변환
+      if (cameraImage.format.group == ImageFormatGroup.nv21) {
+        return _convertNV21ToRGB(cameraImage);
       }
       
       // BGRA8888 포맷 (iOS) - 복사본 생성
@@ -445,37 +401,24 @@ class RealtimeStreamProcessor {
     }
   }
   
-  /// YUV420 to RGB 변환
-  Uint8List _convertYUV420ToRGB(CameraImage cameraImage) {
+  /// NV21 to RGB 변환 (Android)
+  Uint8List _convertNV21ToRGB(CameraImage cameraImage) {
     final int width = cameraImage.width;
     final int height = cameraImage.height;
-    final int uvRowStride = cameraImage.planes[1].bytesPerRow;
-    final int uvPixelStride = cameraImage.planes[1].bytesPerPixel ?? 1;
     
     // RGB 이미지 생성
     final image = img.Image(width: width, height: height);
     
     final yPlane = cameraImage.planes[0].bytes;
-    final uPlane = cameraImage.planes[1].bytes;
-    final vPlane = cameraImage.planes[2].bytes;
     
+    // NV21은 단일 평면이므로 간단한 처리
     for (int y = 0; y < height; y++) {
       for (int x = 0; x < width; x++) {
         final int yIndex = y * width + x;
-        final int uvIndex = (y ~/ 2) * uvRowStride + (x ~/ 2) * uvPixelStride;
-        
         final int yValue = yPlane[yIndex];
-        final int uValue = uPlane[uvIndex];
-        final int vValue = vPlane[uvIndex];
         
-        // YUV to RGB 변환 공식
-        int r = (yValue + 1.402 * (vValue - 128)).round().clamp(0, 255);
-        int g = (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128))
-            .round()
-            .clamp(0, 255);
-        int b = (yValue + 1.772 * (uValue - 128)).round().clamp(0, 255);
-        
-        image.setPixelRgba(x, y, r, g, b, 255);
+        // NV21은 Y 채널만 있으므로 그레이스케일로 처리
+        image.setPixelRgba(x, y, yValue, yValue, yValue, 255);
       }
     }
     

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../realtime_stream_processor.dart';
@@ -64,7 +65,9 @@ class _AdvancedExampleState extends State<AdvancedExample> {
         cameras.first,
         ResolutionPreset.medium,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.yuv420,
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.nv21     // Android: nv21만 지원
+            : ImageFormatGroup.bgra8888, // iOS: bgra8888만 지원
       );
 
       await _cameraController!.initialize();
